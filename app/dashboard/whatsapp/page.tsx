@@ -20,7 +20,20 @@ export default function WhatsAppPage() {
 
   useEffect(() => {
     async function fetchStatus() {
-      const { data } = await supabase.from("whatsapp_credentials").select("id, status").maybeSingle();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setLoading(false);
+        return;
+      }
+
+      const { data } = await supabase
+        .from("whatsapp_credentials")
+        .select("id, status")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
       if (data) {
         setStatus(data.status as any);
         setSessionId(data.id);
@@ -31,21 +44,56 @@ export default function WhatsAppPage() {
   }, []);
 
   async function handleApiKeySubmit() {
-    await supabase.from("whatsapp_credentials").upsert({
-      connection_type: "api_key",
-      provider,
-      api_key: apiKey,
-      phone_number_id: phoneNumberId,
-      base_url: baseUrl || null,
-      status: "connected",
-    });
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+
+    // Check karo is user ka pehle se koi credential row hai —
+    // agar hai to update karo, warna naya banao (taake har baar duplicate row na bane)
+    const { data: existing } = await supabase
+      .from("whatsapp_credentials")
+      .select("id")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (existing) {
+      await supabase
+        .from("whatsapp_credentials")
+        .update({
+          connection_type: "api_key",
+          provider,
+          api_key: apiKey,
+          phone_number_id: phoneNumberId,
+          base_url: baseUrl || null,
+          status: "connected",
+        })
+        .eq("id", existing.id);
+    } else {
+      await supabase.from("whatsapp_credentials").insert({
+        user_id: user.id,
+        connection_type: "api_key",
+        provider,
+        api_key: apiKey,
+        phone_number_id: phoneNumberId,
+        base_url: baseUrl || null,
+        status: "connected",
+      });
+    }
+
     setStatus("connected");
   }
 
   async function handleQrConnect() {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+
     const { data: existing } = await supabase
       .from("whatsapp_credentials")
       .select("id")
+      .eq("user_id", user.id)
       .eq("connection_type", "qr")
       .order("created_at", { ascending: false })
       .limit(1)
@@ -58,7 +106,7 @@ export default function WhatsAppPage() {
     } else {
       const { data } = await supabase
         .from("whatsapp_credentials")
-        .insert({ connection_type: "qr", status: "pending" })
+        .insert({ user_id: user.id, connection_type: "qr", status: "pending" })
         .select()
         .single();
       id = data.id;
@@ -66,10 +114,10 @@ export default function WhatsAppPage() {
 
     setSessionId(id);
 
-    await fetch(`http://localhost:4000/connect/${id}`, { method: "POST" });
+    await fetch(`${process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL}/connect/${id}`, { method: "POST" });
 
     const interval = setInterval(async () => {
-      const res = await fetch(`http://localhost:4000/status/${id}`);
+      const res = await fetch(`${process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL}/status/${id}`);
       const result = await res.json();
 
       if (result.qr) setQrImage(result.qr);
@@ -85,7 +133,7 @@ export default function WhatsAppPage() {
     setResetting(true);
 
     try {
-      await fetch(`http://localhost:4000/disconnect/${sessionId}`, { method: "POST" });
+      await fetch(`${process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL}/disconnect/${sessionId}`, { method: "POST" });
     } catch (e) {
       console.log("Backend disconnect call fail hui:", e);
     }

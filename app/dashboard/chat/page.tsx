@@ -17,9 +17,15 @@ export default function WhatsAppChatPage() {
   }, [selected]);
 
   async function loadConversations() {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+
     const { data: convos } = await supabase
       .from("conversations")
       .select("*")
+      .eq("user_id", user.id)
       .order("last_message_at", { ascending: false });
     setConversations(convos || []);
   }
@@ -35,9 +41,15 @@ export default function WhatsAppChatPage() {
 
   useEffect(() => {
     async function init() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
       const { data: cred } = await supabase
         .from("whatsapp_credentials")
         .select("id")
+        .eq("user_id", user.id)
         .eq("status", "connected")
         .order("created_at", { ascending: false })
         .limit(1)
@@ -73,7 +85,7 @@ export default function WhatsAppChatPage() {
     const textToSend = reply;
     setReply("");
 
-    await fetch(`http://localhost:4000/send/${sessionId}`, {
+    await fetch(`${process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL}/send/${sessionId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ to: selected.customer_number, text: textToSend }),
