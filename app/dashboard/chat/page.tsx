@@ -85,9 +85,16 @@ export default function WhatsAppChatPage() {
     const textToSend = reply;
     setReply("");
 
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
     await fetch(`${process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL}/send/${sessionId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session?.access_token}`,
+      },
       body: JSON.stringify({ to: selected.customer_number, text: textToSend }),
     });
 

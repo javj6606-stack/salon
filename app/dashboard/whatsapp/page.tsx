@@ -2,21 +2,28 @@
 import { useState, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
 
+type Provider = "meta" | "provider" | "custom";
+
+const WHATSAPP_SERVICE_URL = process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL;
+
 export default function WhatsAppPage() {
   const supabase = createClient();
 
   const [status, setStatus] = useState<"not_connected" | "pending" | "connected">("not_connected");
-  const [mode, setMode] = useState<"choose" | "qr" | "api_key">("choose");
+  const [mode, setMode] = useState<"choose" | "connect">("choose");
   const [loading, setLoading] = useState(true);
   const [resetting, setResetting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const [provider, setProvider] = useState("meta");
+  const [provider, setProvider] = useState<Provider>("meta");
   const [apiKey, setApiKey] = useState("");
   const [phoneNumberId, setPhoneNumberId] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
 
-  const [qrImage, setQrImage] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [webhookSecret, setWebhookSecret] = useState<string | null>(null);
+  const [connectedProvider, setConnectedProvider] = useState<Provider | null>(null);
 
   useEffect(() => {
     async function fetchStatus() {
@@ -30,122 +37,94 @@ export default function WhatsAppPage() {
 
       const { data } = await supabase
         .from("whatsapp_credentials")
-        .select("id, status")
+        .select("id, status, provider, webhook_secret")
         .eq("user_id", user.id)
         .maybeSingle();
 
       if (data) {
-        setStatus(data.status as any);
+        setStatus((data.status as any) || "not_connected");
         setSessionId(data.id);
+        setWebhookSecret(data.webhook_secret);
+        setConnectedProvider(data.provider as Provider | null);
       }
       setLoading(false);
     }
     fetchStatus();
   }, []);
 
-  async function handleApiKeySubmit() {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
+  async function handleSubmit() {
+    setError(null);
 
-    // Check karo is user ka pehle se koi credential row hai —
-    // agar hai to update karo, warna naya banao (taake har baar duplicate row na bane)
-    const { data: existing } = await supabase
-      .from("whatsapp_credentials")
-      .select("id")
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (existing) {
-      await supabase
-        .from("whatsapp_credentials")
-        .update({
-          connection_type: "api_key",
-          provider,
-          api_key: apiKey,
-          phone_number_id: phoneNumberId,
-          base_url: baseUrl || null,
-          status: "connected",
-        })
-        .eq("id", existing.id);
-    } else {
-      await supabase.from("whatsapp_credentials").insert({
-        user_id: user.id,
-        connection_type: "api_key",
-        provider,
-        api_key: apiKey,
-        phone_number_id: phoneNumberId,
-        base_url: baseUrl || null,
-        status: "connected",
-      });
+    if (provider === "meta" && (!apiKey || !phoneNumberId)) {
+      setError("Access Token aur Phone Number ID dono zaroori hain.");
+      return;
+    }
+    if ((provider === "provider" || provider === "custom") && (!apiKey || !baseUrl)) {
+      setError("API Key aur Base URL dono zaroori hain.");
+      return;
     }
 
-    setStatus("connected");
-  }
+    setSaving(true);
 
-  async function handleQrConnect() {
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!user) {
+      setSaving(false);
+      return;
+    }
 
     const { data: existing } = await supabase
       .from("whatsapp_credentials")
       .select("id")
       .eq("user_id", user.id)
-      .eq("connection_type", "qr")
-      .order("created_at", { ascending: false })
-      .limit(1)
       .maybeSingle();
 
-    let id;
+    const payload = {
+      provider,
+      api_key: apiKey,
+      phone_number_id: provider === "meta" ? phoneNumberId : null,
+      base_url: provider !== "meta" ? baseUrl : null,
+      status: "connected" as const,
+    };
+
+    let id = existing?.id;
     if (existing) {
-      id = existing.id;
-      await supabase.from("whatsapp_credentials").update({ status: "pending" }).eq("id", id);
+      await supabase.from("whatsapp_credentials").update(payload).eq("id", existing.id);
     } else {
       const { data } = await supabase
         .from("whatsapp_credentials")
-        .insert({ user_id: user.id, connection_type: "qr", status: "pending" })
+        .insert({ user_id: user.id, ...payload })
         .select()
         .single();
-      id = data.id;
+      id = data?.id;
     }
 
-    setSessionId(id);
+    // webhook_secret naya row banne pe DB default se generate ho chuki hoti hai — dobara fetch karo
+    const { data: fresh } = await supabase
+      .from("whatsapp_credentials")
+      .select("id, webhook_secret, provider")
+      .eq("id", id)
+      .maybeSingle();
 
-    await fetch(`${process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL}/connect/${id}`, { method: "POST" });
-
-    const interval = setInterval(async () => {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL}/status/${id}`);
-      const result = await res.json();
-
-      if (result.qr) setQrImage(result.qr);
-      if (result.status === "connected") {
-        setStatus("connected");
-        clearInterval(interval);
-      }
-    }, 2000);
+    setSessionId(fresh?.id || id || null);
+    setWebhookSecret(fresh?.webhook_secret || null);
+    setConnectedProvider(provider);
+    setStatus("connected");
+    setSaving(false);
   }
 
   async function handleReset() {
     if (!sessionId) return;
     setResetting(true);
 
-    try {
-      await fetch(`${process.env.NEXT_PUBLIC_WHATSAPP_SERVICE_URL}/disconnect/${sessionId}`, { method: "POST" });
-    } catch (e) {
-      console.log("Backend disconnect call fail hui:", e);
-    }
-
-    await supabase
-      .from("whatsapp_credentials")
-      .update({ status: "not_connected" })
-      .eq("id", sessionId);
+    await supabase.from("whatsapp_credentials").update({ status: "not_connected" }).eq("id", sessionId);
 
     setStatus("not_connected");
     setMode("choose");
-    setQrImage(null);
+    setApiKey("");
+    setPhoneNumberId("");
+    setBaseUrl("");
     setResetting(false);
   }
 
@@ -154,8 +133,7 @@ export default function WhatsAppPage() {
     border: "1px solid #F0DDD3",
     boxShadow: "0 10px 30px rgba(198, 112, 122, 0.10)",
   };
-  const inputStyle =
-    "border rounded-xl p-2 w-full focus:outline-none focus:ring-2 transition-colors";
+  const inputStyle = "border rounded-xl p-2 w-full focus:outline-none focus:ring-2 transition-colors";
   const inputBorderStyle = { borderColor: "#E9D6CC", ["--tw-ring-color" as any]: "#C6707A" } as React.CSSProperties;
 
   if (loading) {
@@ -165,6 +143,9 @@ export default function WhatsAppPage() {
       </div>
     );
   }
+
+  const webhookUrlFor = (p: Provider) =>
+    `${WHATSAPP_SERVICE_URL}/webhook/${p === "meta" ? "meta" : p}${p === "meta" ? "" : `/${sessionId}`}`;
 
   return (
     <div className="min-h-screen p-8">
@@ -176,31 +157,28 @@ export default function WhatsAppPage() {
       </h1>
 
       {status === "connected" && (
-        <div className="mb-6 p-5 rounded-2xl max-w-md" style={cardStyle}>
-          <p className="mb-3 font-medium" style={{ color: "#5C7A52" }}>✅ WhatsApp connected</p>
-          <button
-            onClick={handleReset}
-            disabled={resetting}
-            className="px-4 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50"
-            style={{ border: "1px solid #E9B9A8", color: "#B4573D" }}
-            onMouseEnter={(e) => !resetting && (e.currentTarget.style.backgroundColor = "#F7DED7")}
-            onMouseLeave={(e) => !resetting && (e.currentTarget.style.backgroundColor = "transparent")}
-          >
-            {resetting ? "Reset ho raha hai..." : "🔄 Connection Reset Karo"}
-          </button>
-        </div>
-      )}
+        <div className="mb-6 p-5 rounded-2xl max-w-lg" style={cardStyle}>
+          <p className="mb-3 font-medium" style={{ color: "#5C7A52" }}>
+            ✅ WhatsApp connected ({connectedProvider === "meta" ? "Meta Cloud API" : connectedProvider === "provider" ? "Provider API" : "Custom API"})
+          </p>
 
-      {status === "pending" && (
-        <div className="mb-6 p-5 rounded-2xl max-w-md" style={cardStyle}>
-          <p className="mb-3 font-medium" style={{ color: "#8A6A2F" }}>Connection setup baaki hai...</p>
+          {connectedProvider !== "meta" && sessionId && webhookSecret && (
+            <div className="mb-4 p-3 rounded-xl text-xs" style={{ backgroundColor: "#FBF3EE", color: "#5C4A45" }}>
+              <p className="font-semibold mb-1">Apne provider ki webhook settings mein ye daalo:</p>
+              <p className="mb-1">
+                URL: <code className="break-all">{webhookUrlFor(connectedProvider)}</code>
+              </p>
+              <p>
+                Header: <code>X-Webhook-Secret: {webhookSecret}</code>
+              </p>
+            </div>
+          )}
+
           <button
             onClick={handleReset}
             disabled={resetting}
             className="px-4 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50"
             style={{ border: "1px solid #E9B9A8", color: "#B4573D" }}
-            onMouseEnter={(e) => !resetting && (e.currentTarget.style.backgroundColor = "#F7DED7")}
-            onMouseLeave={(e) => !resetting && (e.currentTarget.style.backgroundColor = "transparent")}
           >
             {resetting ? "Reset ho raha hai..." : "🔄 Connection Reset Karo"}
           </button>
@@ -208,111 +186,84 @@ export default function WhatsAppPage() {
       )}
 
       {status === "not_connected" && mode === "choose" && (
-        <div className="grid grid-cols-2 gap-5 max-w-3xl">
-          <button
-            onClick={() => setMode("qr")}
-            className="rounded-2xl p-6 text-left transition-colors"
-            style={cardStyle}
-            onMouseEnter={(e) => (e.currentTarget.style.borderColor = "#C6707A")}
-            onMouseLeave={(e) => (e.currentTarget.style.borderColor = "#F0DDD3")}
-          >
-            <h3 className="font-display font-bold mb-2" style={{ color: "#3B2A2E" }}>📱 QR Code se Connect</h3>
-            <p className="text-sm" style={{ color: "#8A6F6A" }}>
-              Apne phone se QR scan karein — sabse asaan tareeqa, koi API key nahi chahiye.
-            </p>
-          </button>
-
-          <button
-            onClick={() => setMode("api_key")}
-            className="rounded-2xl p-6 text-left transition-colors"
-            style={cardStyle}
-            onMouseEnter={(e) => (e.currentTarget.style.borderColor = "#C6707A")}
-            onMouseLeave={(e) => (e.currentTarget.style.borderColor = "#F0DDD3")}
-          >
-            <h3 className="font-display font-bold mb-2" style={{ color: "#3B2A2E" }}>🔑 API Key se Connect</h3>
-            <p className="text-sm" style={{ color: "#8A6F6A" }}>
-              Meta Cloud API, Green API, Twilio ya kisi bhi provider ki credentials daal ke connect karein.
-            </p>
-          </button>
-        </div>
-      )}
-
-      {status === "not_connected" && mode === "qr" && (
-        <div className="rounded-2xl p-6 max-w-md" style={cardStyle}>
-          <p className="mb-4" style={{ color: "#8A6F6A" }}>
-            Neeche button dabao, QR code aayega — apne WhatsApp se scan kar lena.
+        <button
+          onClick={() => setMode("connect")}
+          className="rounded-2xl p-6 text-left transition-colors max-w-md"
+          style={cardStyle}
+        >
+          <h3 className="font-display font-bold mb-2" style={{ color: "#3B2A2E" }}>
+            🔑 WhatsApp API se Connect Karo
+          </h3>
+          <p className="text-sm" style={{ color: "#8A6F6A" }}>
+            Meta Cloud API (official), koi third-party provider (jaise WATI), ya apna custom backend use karo.
           </p>
-          <button
-            onClick={handleQrConnect}
-            className="text-white px-4 py-2 rounded-xl transition-colors"
-            style={{ backgroundColor: "#C6707A" }}
-            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#B85C6B")}
-            onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "#C6707A")}
-          >
-            Generate QR Code
-          </button>
-
-          {qrImage && (
-            <img
-              src={qrImage}
-              alt="Scan this QR"
-              className="w-64 h-64 mt-4 rounded-xl"
-              style={{ border: "1px solid #F0DDD3" }}
-            />
-          )}
-
-          <div>
-            <button onClick={() => setMode("choose")} className="mt-3 text-sm" style={{ color: "#A68880" }}>
-              Wapas jao
-            </button>
-          </div>
-        </div>
+        </button>
       )}
 
-      {status === "not_connected" && mode === "api_key" && (
+      {status === "not_connected" && mode === "connect" && (
         <div className="rounded-2xl p-6 space-y-3 max-w-md" style={cardStyle}>
           <select
             value={provider}
-            onChange={(e) => setProvider(e.target.value)}
+            onChange={(e) => setProvider(e.target.value as Provider)}
             className={inputStyle}
             style={inputBorderStyle}
           >
-            <option value="meta">Meta Cloud API</option>
-            <option value="green_api">Green API</option>
-            <option value="twilio">Twilio</option>
-            <option value="other">Other</option>
+            <option value="meta">Meta Cloud API (official, recommended)</option>
+            <option value="provider">Provider API (e.g. WATI)</option>
+            <option value="custom">Custom API</option>
           </select>
 
-          <input
-            placeholder="API Key / Access Token"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            className={inputStyle}
-            style={inputBorderStyle}
-          />
-          <input
-            placeholder="Phone Number ID / Instance ID"
-            value={phoneNumberId}
-            onChange={(e) => setPhoneNumberId(e.target.value)}
-            className={inputStyle}
-            style={inputBorderStyle}
-          />
-          <input
-            placeholder="Base URL (optional, sirf kuch providers ke liye)"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            className={inputStyle}
-            style={inputBorderStyle}
-          />
+          {provider === "meta" && (
+            <>
+              <input
+                placeholder="Access Token"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className={inputStyle}
+                style={inputBorderStyle}
+              />
+              <input
+                placeholder="Phone Number ID"
+                value={phoneNumberId}
+                onChange={(e) => setPhoneNumberId(e.target.value)}
+                className={inputStyle}
+                style={inputBorderStyle}
+              />
+            </>
+          )}
+
+          {(provider === "provider" || provider === "custom") && (
+            <>
+              <input
+                placeholder="Base URL (e.g. https://live-server.wati.io)"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                className={inputStyle}
+                style={inputBorderStyle}
+              />
+              <input
+                placeholder="API Key / Access Token"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className={inputStyle}
+                style={inputBorderStyle}
+              />
+            </>
+          )}
+
+          {error && (
+            <p className="text-sm" style={{ color: "#B4573D" }}>
+              {error}
+            </p>
+          )}
 
           <button
-            onClick={handleApiKeySubmit}
-            className="text-white px-4 py-2 rounded-xl transition-colors"
+            onClick={handleSubmit}
+            disabled={saving}
+            className="text-white px-4 py-2 rounded-xl transition-colors disabled:opacity-50"
             style={{ backgroundColor: "#C6707A" }}
-            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#B85C6B")}
-            onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "#C6707A")}
           >
-            Connect
+            {saving ? "Connect ho raha hai..." : "Connect"}
           </button>
           <button onClick={() => setMode("choose")} className="ml-3 text-sm" style={{ color: "#A68880" }}>
             Wapas jao
