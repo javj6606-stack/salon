@@ -162,7 +162,7 @@ export default function WhatsAppPage() {
             ✅ WhatsApp connected ({connectedProvider === "meta" ? "Meta Cloud API" : connectedProvider === "provider" ? "Provider API" : "Custom API"})
           </p>
 
-          {connectedProvider !== "meta" && sessionId && webhookSecret && (
+          {connectedProvider && connectedProvider !== "meta" && sessionId && webhookSecret && (
             <div className="mb-4 p-3 rounded-xl text-xs" style={{ backgroundColor: "#FBF3EE", color: "#5C4A45" }}>
               <p className="font-semibold mb-1">Apne provider ki webhook settings mein ye daalo:</p>
               <p className="mb-1">
