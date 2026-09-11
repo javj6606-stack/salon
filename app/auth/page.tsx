@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
+import { checkPwnedPassword } from "@/lib/checkPwnedPassword";
 
 export default function AuthPage() {
   const supabase = createClient();
@@ -30,6 +31,17 @@ export default function AuthPage() {
 
   const handleSignup = async () => {
     setLoading(true);
+
+    // Check this password against known data breaches before creating the account
+    const pwnedCount = await checkPwnedPassword(password);
+    if (pwnedCount > 0) {
+      setLoading(false);
+      alert(
+        "Ye password kisi data-breach mein leak ho chuka hai. Meherbani karke koi doosra, strong password istemal karein."
+      );
+      return;
+    }
+
     const { error } = await supabase.auth.signUp({
       email,
       password,
